@@ -1,0 +1,17 @@
+{
+  "skills": [
+    {
+      "name": "audit-orchestrator",
+      "entrypoint": true
+    },
+    {
+      "name": "crawl-render-audit"
+    },
+    {
+      "name": "freshness-corroboration"
+    },
+    {
+      "name": "engagement-audit"
+    }
+  ]
+}

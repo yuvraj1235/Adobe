@@ -1,0 +1,10 @@
+{
+  "name": "freshness-corroboration",
+  "version": "1.0.0",
+  "description": "Execution logic for freshness-corroboration",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node index.js"
+  }
+}

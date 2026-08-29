@@ -1,0 +1,10 @@
+{
+  "name": "engagement-audit",
+  "version": "1.0.0",
+  "description": "Execution logic for engagement-audit",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node index.js"
+  }
+}

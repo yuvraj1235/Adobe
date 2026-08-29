@@ -1,0 +1,10 @@
+{
+  "name": "audit-orchestrator",
+  "version": "1.0.0",
+  "description": "Execution logic for audit-orchestrator",
+  "main": "index.js",
+  "type": "module",
+  "scripts": {
+    "start": "node index.js"
+  }
+}

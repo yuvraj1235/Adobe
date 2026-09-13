@@ -36,6 +36,60 @@ export function jsonLdBlocks(html) {
   return [...html.matchAll(/<script\b[^>]*type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi)].map((match) => match[1].trim());
 }
 
+export function detectBotBlock(page) {
+  if (!page || !page.body) return { isBlocked: true, reason: "Empty response body", signature: "empty_body", findingTitle: "Crawler blocked or served incomplete content" };
+  const body = page.body;
+  const status = page.status;
+  const bytes = page.bytes || Buffer.byteLength(body);
+
+  // 1. Keyword / signature matching (challenge pages, CAPTCHAs, WAF intercepts)
+  const signatures = [
+    { pattern: /To discuss automated access to Amazon data please contact/i, name: "Amazon automated access notice" },
+    { pattern: /Type the characters you see in this image|Enter the characters you see below/i, name: "Amazon/General image CAPTCHA" },
+    { pattern: /\b(g-recaptcha|recaptcha|hcaptcha|cf-turnstile)\b/i, name: "Interactive CAPTCHA widget" },
+    { pattern: /\b(unusual traffic|verify you are human|are you a human|robot check|automated queries)\b/i, name: "Bot challenge / human verification prompt" },
+    { pattern: /\b(cf-browser-verification|challenge-running|just a moment\.\.\.|attention required!\s*\|\s*cloudflare)\b/i, name: "Cloudflare challenge page" },
+    { pattern: /\b(perimeterx|distil networks|datadome|incapsula|shieldsquare|akamaighost)\b/i, name: "WAF bot protection intercept" },
+    { pattern: /<title>\s*(?:Robot Check|Access Denied|Security Challenge|Attention Required|Just a moment\.\.\.)\s*<\/title>/i, name: "Challenge page title" }
+  ];
+
+  for (const sig of signatures) {
+    if (sig.pattern.test(body)) {
+      return { isBlocked: true, reason: `Matched bot-block signature: ${sig.name}`, signature: sig.name, findingTitle: "Crawler blocked or served incomplete content" };
+    }
+  }
+
+  // 2. HTTP status blocking (no need for text analysis)
+  if ([401, 403, 429, 503].includes(status)) {
+    return { isBlocked: true, reason: `Server returned HTTP ${status} blocking automated access`, signature: `HTTP ${status}`, findingTitle: "Crawler blocked or served incomplete content" };
+  }
+
+  // 3. Short error body lacking basic structure
+  if (bytes < 300 && !/<body[\s>]/i.test(body) && status >= 400) {
+    return { isBlocked: true, reason: "Incomplete error response with minimal markup", signature: `HTTP ${status} short body`, findingTitle: "Crawler blocked or served incomplete content" };
+  }
+
+  // 4. Content-emptiness heuristic (threshold-based, keyword-independent).
+  //    A page under 8 KB that strips to fewer than 10 readable characters is almost
+  //    certainly a bot-gate stub, JS-only render shell, or incomplete redirect body.
+  //    This fires on HTTP 200 responses too — the absence of text is the signal, not
+  //    the status code. Threshold chosen to:
+  //      - catch: 2161-byte/0-char JS stubs (e.g. amazon.in mobile shell)
+  //      - miss:  339-byte/48-char noscript pages (JS-only SPA with fallback text)
+  const visibleLen = textContent(body).length;
+  if (bytes < 8000 && visibleLen < 10) {
+    return {
+      isBlocked: true,
+      reason: `Content-emptiness threshold: ${bytes} bytes, ${visibleLen} stripped chars`,
+      signature: "content_empty",
+      findingTitle: "Fetched content is empty or non-representative — possible bot-block, redirect stub, or JS-only render"
+    };
+  }
+
+  return { isBlocked: false, reason: "", signature: "", findingTitle: "" };
+}
+
+
 export async function fetchText(url, { userAgent = "BrandAIReadinessAudit/1.0", timeoutMs = 10000 } = {}) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);

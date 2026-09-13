@@ -1,4 +1,4 @@
-import { fetchText, jsonLdBlocks, linksFrom, makeFinding, metaContent, normalizeSite, readRobots, robotsDisallows, tagValues, textContent } from "../../shared/audit-utils.js";
+import { detectBotBlock, fetchText, jsonLdBlocks, linksFrom, makeFinding, metaContent, normalizeSite, readRobots, robotsDisallows, tagValues, textContent } from "../../shared/audit-utils.js";
 
 export async function runCrawlAudit(siteInput) {
 	const site = normalizeSite(siteInput);
@@ -11,7 +11,24 @@ export async function runCrawlAudit(siteInput) {
 	let page;
 	try { page = await fetchText(site, { userAgent: "BrandAIReadinessAudit/1.0 (read-only audit)" }); }
 	catch (error) {
+		process.stderr.write(`[crawl] FETCH FAILED url=${site.href} error=${error.name === "AbortError" ? "timeout" : error.message}\n`);
 		findings.push(makeFinding({ id: "CR-002", title: "Landing page could not be fetched", severity: "critical", evidence: `${error.name === "AbortError" ? "Request timed out" : error.message}.`, summary: "Make the public landing page reachable with a normal HTTPS request.", priority: "critical" }));
+		return { findings, pages: [] };
+	}
+	process.stderr.write(`[crawl] FETCH url=${page.url} status=${page.status} bytes=${page.bytes} redirects=${page.redirectCount} durationMs=${page.durationMs}\n`);
+	const botCheck = detectBotBlock(page);
+	if (botCheck.isBlocked) {
+		const logTag = botCheck.signature === "content_empty" ? "CONTENT-EMPTY" : "BOT-BLOCK";
+		process.stderr.write(`[crawl] ${logTag} url=${page.url} status=${page.status} bytes=${page.bytes} reason="${botCheck.reason}"` + "\n");
+		const severity = botCheck.signature === "content_empty" ? "high" : "critical";
+		findings.push(makeFinding({
+			id: "CR-000",
+			title: botCheck.findingTitle,
+			severity,
+			evidence: `HTTP ${page.status}, ${page.bytes} bytes, ${textContent(page.body).length} stripped chars. ${botCheck.reason}. All downstream content checks suppressed to avoid false positives on non-representative content.`,
+			summary: "Ensure public content is accessible to automated crawlers and AI search agents. Provide a server-rendered HTML response with visible text. If content requires JavaScript to render, add a static fallback or use server-side rendering.",
+			priority: severity
+		}));
 		return { findings, pages: [] };
 	}
 	const body = page.body;
@@ -24,13 +41,13 @@ export async function runCrawlAudit(siteInput) {
 	const scriptCount = [...body.matchAll(/<script\b/gi)].length;
 	const canonical = [...body.matchAll(/<link\b[^>]*rel=["'][^"']*canonical[^"']*["'][^>]*href=["']([^"']+)["'][^>]*>/gi)][0]?.[1] || "";
 	const noindex = /<meta\b[^>]*(?:name|property)=["'](?:robots|googlebot)["'][^>]*content=["'][^"']*noindex/i.test(body);
-	if (page.redirectCount > 0) findings.push(makeFinding({ id: "CR-003", title: "Landing page requires redirects", severity: "low", evidence: `The request followed ${page.redirectCount} redirect${page.redirectCount === 1 ? "" : "s"} before reaching ${page.url}.`, summary: "Link to the final canonical URL directly where possible and keep redirect chains short.", priority: "low" }));
-	if (page.status >= 300 && page.status < 400) findings.push(makeFinding({ id: "CR-015", title: "Landing page redirect could not be resolved", severity: "medium", evidence: `The request stopped at HTTP ${page.status} after ${page.redirectCount} redirect hops.`, summary: "Return a reachable final URL in the Location header and keep redirect chains within normal crawler limits.", priority: "medium" }));
-	else if (page.status >= 400) findings.push(makeFinding({ id: "CR-004", title: "Landing page returns an error status", severity: "critical", evidence: `The landing page returned HTTP ${page.status}.`, summary: "Return a successful, indexable response for the public landing page.", priority: "critical" }));
-	if (!/text\/html|application\/xhtml/i.test(page.headers.get("content-type") || "")) findings.push(makeFinding({ id: "CR-005", title: "Landing page is not served as HTML", severity: "high", evidence: `Content-Type was ${page.headers.get("content-type") || "missing"}.`, summary: "Serve the primary page as parseable HTML with a correct Content-Type header.", priority: "high" }));
-	if (visibleText.length < 200) findings.push(makeFinding({ id: "CR-006", title: "Landing page has very little server-readable text", severity: "high", evidence: `Only ${visibleText.length} characters remained after removing scripts and markup.`, summary: "Render the brand name, offer, audience, and key facts as plain HTML text in the initial response.", priority: "high" }));
-		if (visibleText.length < 200 && scriptCount >= 3) findings.push(makeFinding({ id: "CR-018", title: "Landing page appears dependent on client-side rendering", severity: "high", evidence: `The initial response contains ${scriptCount} script elements but fewer than 200 readable characters.`, summary: "Server-render primary content or provide a crawler-readable rendering path without requiring browser JavaScript execution.", priority: "high" }));
-	if (!title) findings.push(makeFinding({ id: "CR-007", title: "Landing page has no title", severity: "high", evidence: "No title element was found in the fetched HTML.", summary: "Add a concise, page-specific title describing the brand and primary offer.", priority: "high" }));
+	if (page.redirectCount > 0) findings.push(makeFinding({ id: "CR-003", title: "Landing page requires redirects", severity: "low", evidence: `HTTP ${page.status}, ${page.bytes} bytes. Followed ${page.redirectCount} redirect${page.redirectCount === 1 ? "" : "s"} before reaching ${page.url}.`, summary: "Link to the final canonical URL directly where possible and keep redirect chains short.", priority: "low" }));
+	if (page.status >= 300 && page.status < 400) findings.push(makeFinding({ id: "CR-015", title: "Landing page redirect could not be resolved", severity: "medium", evidence: `HTTP ${page.status}, ${page.bytes} bytes. Stopped after ${page.redirectCount} redirect hops.`, summary: "Return a reachable final URL in the Location header and keep redirect chains within normal crawler limits.", priority: "medium" }));
+	else if (page.status >= 400) findings.push(makeFinding({ id: "CR-004", title: "Landing page returns an error status", severity: "critical", evidence: `HTTP ${page.status}, ${page.bytes} bytes. Return a successful, indexable response for the public landing page.`, summary: "Return a successful, indexable response for the public landing page.", priority: "critical" }));
+	if (!/text\/html|application\/xhtml/i.test(page.headers.get("content-type") || "")) findings.push(makeFinding({ id: "CR-005", title: "Landing page is not served as HTML", severity: "high", evidence: `HTTP ${page.status}, ${page.bytes} bytes. Content-Type was "${page.headers.get("content-type") || "missing"}".`, summary: "Serve the primary page as parseable HTML with a correct Content-Type header.", priority: "high" }));
+	if (visibleText.length < 200) findings.push(makeFinding({ id: "CR-006", title: "Landing page has very little server-readable text", severity: "high", evidence: `HTTP ${page.status}, ${page.bytes} bytes. Only ${visibleText.length} characters remained after stripping scripts and markup.`, summary: "Render the brand name, offer, audience, and key facts as plain HTML text in the initial response.", priority: "high" }));
+	if (visibleText.length < 200 && scriptCount >= 3) findings.push(makeFinding({ id: "CR-018", title: "Landing page appears dependent on client-side rendering", severity: "high", evidence: `HTTP ${page.status}, ${page.bytes} bytes. Response has ${scriptCount} script elements but only ${visibleText.length} readable characters — content likely requires JavaScript execution.`, summary: "Server-render primary content or provide a crawler-readable rendering path without requiring browser JavaScript execution.", priority: "high" }));
+	if (!title) findings.push(makeFinding({ id: "CR-007", title: "Landing page has no title", severity: "high", evidence: `HTTP ${page.status}, ${page.bytes} bytes. No title element was found in the fetched HTML.`, summary: "Add a concise, page-specific title describing the brand and primary offer.", priority: "high" }));
 	if (!metaContent(body, "description")) findings.push(makeFinding({ id: "CR-008", title: "Landing page has no meta description", severity: "medium", evidence: "No description meta tag was found.", summary: "Add a factual meta description that summarizes the page's offer and audience.", priority: "medium" }));
 	if (!headings.length || !/<h1\b/i.test(body)) findings.push(makeFinding({ id: "CR-009", title: "Landing page lacks a clear H1", severity: "medium", evidence: `Found ${headings.length} heading elements and no H1 heading.`, summary: "Add one descriptive H1 that states the primary brand proposition in text.", priority: "medium" }));
 	if (!structuredData.length) findings.push(makeFinding({ id: "CR-010", title: "Landing page has no JSON-LD structured data", severity: "medium", evidence: "No application/ld+json block was found in the fetched HTML.", summary: "Add accurate Organization, WebSite, and relevant Product or Service JSON-LD.", priority: "medium" }));

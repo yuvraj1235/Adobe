@@ -10,14 +10,14 @@ license: MIT
 Use this skill as the primary entrypoint to run a full brand AI readiness audit. It is responsible for orchestrating the sub-audits, managing context, and producing the final comprehensive JSON report.
 
 ## Inputs
-- `site` (string): The URL of the brand's website to audit.
+- `site` (string): An HTTP(S) URL or domain for a public website.
 
 ## Procedure
 1. Initialize the audit process and record the start time.
 2. Invoke `crawl-render-audit` to evaluate technical discoverability and payload efficiency.
 3. Invoke `freshness-corroboration` to check data consistency and knowledge graph alignment.
 4. Invoke `engagement-audit` to assess conversational AI readiness and citation likelihood.
-5. Aggregate all findings, calculate the summary statistics, and return the final report.
+5. Aggregate findings, remove duplicates, calculate counts, and return the final report. If a specialist fails, emit a limitation finding and continue.
 
 ## Output
 The final output must strictly adhere to the following JSON schema:
@@ -37,7 +37,10 @@ The final output must strictly adhere to the following JSON schema:
       "title": "string",
       "severity": "string (critical|high|medium|low)",
       "evidence": "string",
-      "suggested_action": "string"
+      "suggested_action": {
+        "summary": "string",
+        "priority": "string (critical|high|medium|low)"
+      }
     }
   ]
 }

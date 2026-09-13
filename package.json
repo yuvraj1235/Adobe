@@ -1,0 +1,10 @@
+{
+  "name": "brand-ai-readiness-audit",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test test/audit.test.js",
+    "validate": "node scripts/validate.js",
+    "package": "node scripts/package.js"
+  }
+}

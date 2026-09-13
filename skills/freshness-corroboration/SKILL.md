@@ -10,12 +10,12 @@ license: MIT
 Use this skill to verify that the brand's core facts, pricing, and messaging are up-to-date and consistent across different sources, ensuring AI agents don't hallucinate outdated information.
 
 ## Inputs
-- `site` (string): The URL of the brand's website to audit.
+- `site` (string): An HTTP(S) URL or domain for a public website.
 
 ## Procedure
 1. Extract key entities and factual claims from the target site.
-2. Cross-reference these entities with external knowledge graphs and standard search indexes.
+2. Compare entities and claims across the bounded first-party page snapshot; use external sources only when an explicitly configured provider is available.
 3. Identify discrepancies, outdated information, or conflicting claims.
 
 ## Output
-Returns a structured list of findings highlighting data inconsistencies and freshness issues.
+Returns evidence-backed findings and states limitations rather than inventing external corroboration.

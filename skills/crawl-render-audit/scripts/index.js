@@ -1,18 +1,30 @@
-import { detectBotBlock, fetchText, jsonLdBlocks, linksFrom, makeFinding, metaContent, normalizeSite, readRobots, robotsDisallows, tagValues, textContent } from "../../shared/audit-utils.js";
+import { checkAiCrawlerBlocks, detectBotBlock, fetchText, jsonLdBlocks, linksFrom, makeFinding, metaContent, normalizeSite, readRobots, robotsDisallows, tagValues, textContent } from "../../shared/audit-utils.js";
 
 export async function runCrawlAudit(siteInput) {
 	const site = normalizeSite(siteInput);
 	const findings = [];
 	const robots = await readRobots(site);
 	if (robotsDisallows(robots, site.pathname || "/")) {
-		findings.push(makeFinding({ id: "CR-001", title: "Landing page is blocked by robots.txt", severity: "critical", evidence: `robots.txt disallows the audit user agent from ${site.pathname || "/"}.`, summary: "Review robots.txt and allow approved crawlers to access public marketing content.", priority: "critical" }));
+		findings.push(makeFinding({ id: "CR-001", title: "Landing page is blocked by robots.txt", severity: "critical", evidence: `robots.txt disallows the audit user agent from ${site.pathname || "/"}.`, summary: "Review robots.txt and allow approved crawlers to access public marketing content.", priority: "critical", effort: "low" }));
 		return { findings, pages: [] };
+	}
+	const blockedAiCrawlers = checkAiCrawlerBlocks(robots);
+	if (blockedAiCrawlers.length) {
+		findings.push(makeFinding({
+			id: "CR-022",
+			title: "robots.txt explicitly blocks major AI search crawlers",
+			severity: "medium",
+			evidence: `robots.txt disallows AI search crawlers: ${blockedAiCrawlers.join(", ")}. Public brand content will not be indexed or cited by these models.`,
+			summary: "Update robots.txt to permit approved AI search crawlers (e.g. GPTBot, ClaudeBot, PerplexityBot) to index public marketing pages.",
+			priority: "medium",
+			effort: "low"
+		}));
 	}
 	let page;
 	try { page = await fetchText(site, { userAgent: "BrandAIReadinessAudit/1.0 (read-only audit)" }); }
 	catch (error) {
 		process.stderr.write(`[crawl] FETCH FAILED url=${site.href} error=${error.name === "AbortError" ? "timeout" : error.message}\n`);
-		findings.push(makeFinding({ id: "CR-002", title: "Landing page could not be fetched", severity: "critical", evidence: `${error.name === "AbortError" ? "Request timed out" : error.message}.`, summary: "Make the public landing page reachable with a normal HTTPS request.", priority: "critical" }));
+		findings.push(makeFinding({ id: "CR-002", title: "Landing page could not be fetched", severity: "critical", evidence: `${error.name === "AbortError" ? "Request timed out" : error.message}.`, summary: "Make the public landing page reachable with a normal HTTPS request.", priority: "critical", effort: "medium" }));
 		return { findings, pages: [] };
 	}
 	process.stderr.write(`[crawl] FETCH url=${page.url} status=${page.status} bytes=${page.bytes} redirects=${page.redirectCount} durationMs=${page.durationMs}\n`);
@@ -27,7 +39,8 @@ export async function runCrawlAudit(siteInput) {
 			severity,
 			evidence: `HTTP ${page.status}, ${page.bytes} bytes, ${textContent(page.body).length} stripped chars. ${botCheck.reason}. All downstream content checks suppressed to avoid false positives on non-representative content.`,
 			summary: "Ensure public content is accessible to automated crawlers and AI search agents. Provide a server-rendered HTML response with visible text. If content requires JavaScript to render, add a static fallback or use server-side rendering.",
-			priority: severity
+			priority: severity,
+			effort: "high"
 		}));
 		return { findings, pages: [] };
 	}
@@ -41,22 +54,84 @@ export async function runCrawlAudit(siteInput) {
 	const scriptCount = [...body.matchAll(/<script\b/gi)].length;
 	const canonical = [...body.matchAll(/<link\b[^>]*rel=["'][^"']*canonical[^"']*["'][^>]*href=["']([^"']+)["'][^>]*>/gi)][0]?.[1] || "";
 	const noindex = /<meta\b[^>]*(?:name|property)=["'](?:robots|googlebot)["'][^>]*content=["'][^"']*noindex/i.test(body);
-	if (page.redirectCount > 0) findings.push(makeFinding({ id: "CR-003", title: "Landing page requires redirects", severity: "low", evidence: `HTTP ${page.status}, ${page.bytes} bytes. Followed ${page.redirectCount} redirect${page.redirectCount === 1 ? "" : "s"} before reaching ${page.url}.`, summary: "Link to the final canonical URL directly where possible and keep redirect chains short.", priority: "low" }));
-	if (page.status >= 300 && page.status < 400) findings.push(makeFinding({ id: "CR-015", title: "Landing page redirect could not be resolved", severity: "medium", evidence: `HTTP ${page.status}, ${page.bytes} bytes. Stopped after ${page.redirectCount} redirect hops.`, summary: "Return a reachable final URL in the Location header and keep redirect chains within normal crawler limits.", priority: "medium" }));
-	else if (page.status >= 400) findings.push(makeFinding({ id: "CR-004", title: "Landing page returns an error status", severity: "critical", evidence: `HTTP ${page.status}, ${page.bytes} bytes. Return a successful, indexable response for the public landing page.`, summary: "Return a successful, indexable response for the public landing page.", priority: "critical" }));
-	if (!/text\/html|application\/xhtml/i.test(page.headers.get("content-type") || "")) findings.push(makeFinding({ id: "CR-005", title: "Landing page is not served as HTML", severity: "high", evidence: `HTTP ${page.status}, ${page.bytes} bytes. Content-Type was "${page.headers.get("content-type") || "missing"}".`, summary: "Serve the primary page as parseable HTML with a correct Content-Type header.", priority: "high" }));
-	if (visibleText.length < 200) findings.push(makeFinding({ id: "CR-006", title: "Landing page has very little server-readable text", severity: "high", evidence: `HTTP ${page.status}, ${page.bytes} bytes. Only ${visibleText.length} characters remained after stripping scripts and markup.`, summary: "Render the brand name, offer, audience, and key facts as plain HTML text in the initial response.", priority: "high" }));
-	if (visibleText.length < 200 && scriptCount >= 3) findings.push(makeFinding({ id: "CR-018", title: "Landing page appears dependent on client-side rendering", severity: "high", evidence: `HTTP ${page.status}, ${page.bytes} bytes. Response has ${scriptCount} script elements but only ${visibleText.length} readable characters — content likely requires JavaScript execution.`, summary: "Server-render primary content or provide a crawler-readable rendering path without requiring browser JavaScript execution.", priority: "high" }));
-	if (!title) findings.push(makeFinding({ id: "CR-007", title: "Landing page has no title", severity: "high", evidence: `HTTP ${page.status}, ${page.bytes} bytes. No title element was found in the fetched HTML.`, summary: "Add a concise, page-specific title describing the brand and primary offer.", priority: "high" }));
-	if (!metaContent(body, "description")) findings.push(makeFinding({ id: "CR-008", title: "Landing page has no meta description", severity: "medium", evidence: "No description meta tag was found.", summary: "Add a factual meta description that summarizes the page's offer and audience.", priority: "medium" }));
-	if (!headings.length || !/<h1\b/i.test(body)) findings.push(makeFinding({ id: "CR-009", title: "Landing page lacks a clear H1", severity: "medium", evidence: `Found ${headings.length} heading elements and no H1 heading.`, summary: "Add one descriptive H1 that states the primary brand proposition in text.", priority: "medium" }));
-	if (!structuredData.length) findings.push(makeFinding({ id: "CR-010", title: "Landing page has no JSON-LD structured data", severity: "medium", evidence: "No application/ld+json block was found in the fetched HTML.", summary: "Add accurate Organization, WebSite, and relevant Product or Service JSON-LD.", priority: "medium" }));
-	else if (structuredData.some((block) => { try { JSON.parse(block); return false; } catch { return true; } })) findings.push(makeFinding({ id: "CR-014", title: "Landing page contains invalid JSON-LD", severity: "high", evidence: "At least one application/ld+json block could not be parsed as JSON.", summary: "Fix JSON syntax and validate the resulting schema.org objects before publishing them.", priority: "high" }));
-	if (noindex) findings.push(makeFinding({ id: "CR-011", title: "Landing page asks crawlers not to index it", severity: "high", evidence: "A robots or googlebot meta directive contains noindex.", summary: "Remove unintended noindex directives from public pages that should be discoverable.", priority: "high" }));
-	if (/noindex/i.test(page.headers.get("x-robots-tag") || "")) findings.push(makeFinding({ id: "CR-016", title: "Server headers ask crawlers not to index the page", severity: "high", evidence: `X-Robots-Tag was ${page.headers.get("x-robots-tag")}.`, summary: "Remove unintended X-Robots-Tag noindex directives from public pages that should be discoverable.", priority: "high" }));
-	if (!canonical) findings.push(makeFinding({ id: "CR-012", title: "Landing page has no canonical URL", severity: "low", evidence: "No canonical link element was found.", summary: "Declare the preferred canonical URL where duplicate or alternate URLs exist.", priority: "low" }));
-	if (!/<(main|nav|header|footer)\b/i.test(body)) findings.push(makeFinding({ id: "CR-013", title: "Landing page has weak semantic landmarks", severity: "low", evidence: "No main, nav, header, or footer landmark was found in the fetched HTML.", summary: "Use semantic landmarks so automated readers can separate navigation, primary content, and supporting content.", priority: "low" }));
-	if (imagesWithoutAlt) findings.push(makeFinding({ id: "CR-017", title: "Images contain no machine-readable alternative text", severity: "medium", evidence: `${imagesWithoutAlt} of ${images.length} image elements have no alt attribute.`, summary: "Add concise, accurate alt text for informative images and use empty alt text only for decorative images.", priority: "medium" }));
+
+	// CR-003: Redirect chain detected
+	if (page.redirectCount > 0) findings.push(makeFinding({ id: "CR-003", title: "Landing page requires redirects", severity: "low", evidence: `HTTP ${page.status}, ${page.bytes} bytes. Followed ${page.redirectCount} redirect${page.redirectCount === 1 ? "" : "s"} before reaching ${page.url}.`, summary: "Link to the final canonical URL directly where possible and keep redirect chains short.", priority: "low", effort: "low" }));
+
+	// CR-015: Redirect chain exceeded cap or could not be resolved
+	if (page.status >= 300 && page.status < 400) {
+		const capNote = page.redirectCount >= 3 ? " Audit stopped at the 3-hop redirect cap — the final destination URL could not be reached." : "";
+		findings.push(makeFinding({ id: "CR-015", title: "Landing page redirect could not be resolved", severity: "medium", evidence: `HTTP ${page.status}, ${page.bytes} bytes. Stopped after ${page.redirectCount} redirect hop${page.redirectCount === 1 ? "" : "s"}.${capNote}`, summary: "Return a reachable final URL in the Location header and keep redirect chains within normal crawler limits (≤3 hops).", priority: "medium", effort: "medium" }));
+	}
+	else if (page.status >= 400) findings.push(makeFinding({ id: "CR-004", title: "Landing page returns an error status", severity: "critical", evidence: `HTTP ${page.status}, ${page.bytes} bytes.`, summary: "Return a successful, indexable response for the public landing page.", priority: "critical", effort: "medium" }));
+
+	if (!/text\/html|application\/xhtml/i.test(page.headers.get("content-type") || "")) findings.push(makeFinding({ id: "CR-005", title: "Landing page is not served as HTML", severity: "high", evidence: `HTTP ${page.status}, ${page.bytes} bytes. Content-Type was "${page.headers.get("content-type") || "missing"}".`, summary: "Serve the primary page as parseable HTML with a correct Content-Type header.", priority: "high", effort: "low" }));
+	if (visibleText.length < 200) findings.push(makeFinding({ id: "CR-006", title: "Landing page has very little server-readable text", severity: "high", evidence: `HTTP ${page.status}, ${page.bytes} bytes. Only ${visibleText.length} characters remained after stripping scripts and markup.`, summary: "Render the brand name, offer, audience, and key facts as plain HTML text in the initial response.", priority: "high", effort: "high" }));
+	if (visibleText.length < 200 && scriptCount >= 3) findings.push(makeFinding({ id: "CR-018", title: "Landing page appears dependent on client-side rendering", severity: "high", evidence: `HTTP ${page.status}, ${page.bytes} bytes. Response has ${scriptCount} script elements but only ${visibleText.length} readable characters — content likely requires JavaScript execution.`, summary: "Server-render primary content or provide a crawler-readable rendering path without requiring browser JavaScript execution.", priority: "high", effort: "high" }));
+	if (!title) findings.push(makeFinding({ id: "CR-007", title: "Landing page has no title", severity: "high", evidence: `HTTP ${page.status}, ${page.bytes} bytes. No title element was found in the fetched HTML.`, summary: "Add a concise, page-specific title describing the brand and primary offer.", priority: "high", effort: "low" }));
+	if (!metaContent(body, "description")) findings.push(makeFinding({ id: "CR-008", title: "Landing page has no meta description", severity: "medium", evidence: "No description meta tag was found.", summary: "Add a factual meta description that summarizes the page's offer and audience.", priority: "medium", effort: "low" }));
+	if (!headings.length || !/<h1\b/i.test(body)) findings.push(makeFinding({ id: "CR-009", title: "Landing page lacks a clear H1", severity: "medium", evidence: `Found ${headings.length} heading elements and no H1 heading.`, summary: "Add one descriptive H1 that states the primary brand proposition in text.", priority: "medium", effort: "low" }));
+
+	// CR-010 / CR-014: JSON-LD presence and syntax validity
+	if (!structuredData.length) {
+		findings.push(makeFinding({ id: "CR-010", title: "Landing page has no JSON-LD structured data", severity: "medium", evidence: "No application/ld+json block was found in the fetched HTML.", summary: "Add accurate Organization, WebSite, and relevant Product or Service JSON-LD to enable AI agents to understand and corroborate the brand entity.", priority: "medium", effort: "medium" }));
+	} else if (structuredData.some((block) => { try { JSON.parse(block); return false; } catch { return true; } })) {
+		findings.push(makeFinding({ id: "CR-014", title: "Landing page contains invalid JSON-LD", severity: "high", evidence: "At least one application/ld+json block could not be parsed as JSON.", summary: "Fix JSON syntax and validate the resulting schema.org objects before publishing them.", priority: "high", effort: "low" }));
+	}
+
+	if (noindex) findings.push(makeFinding({ id: "CR-011", title: "Landing page asks crawlers not to index it", severity: "high", evidence: "A robots or googlebot meta directive contains noindex.", summary: "Remove unintended noindex directives from public pages that should be discoverable.", priority: "high", effort: "low" }));
+	if (/noindex/i.test(page.headers.get("x-robots-tag") || "")) findings.push(makeFinding({ id: "CR-016", title: "Server headers ask crawlers not to index the page", severity: "high", evidence: `X-Robots-Tag was ${page.headers.get("x-robots-tag")}.`, summary: "Remove unintended X-Robots-Tag noindex directives from public pages that should be discoverable.", priority: "high", effort: "low" }));
+	if (!canonical) findings.push(makeFinding({ id: "CR-012", title: "Landing page has no canonical URL", severity: "low", evidence: "No canonical link element was found.", summary: "Declare the preferred canonical URL where duplicate or alternate URLs exist.", priority: "low", effort: "low" }));
+	if (!/<(main|nav|header|footer)\b/i.test(body)) findings.push(makeFinding({ id: "CR-013", title: "Landing page has weak semantic landmarks", severity: "low", evidence: "No main, nav, header, or footer landmark was found in the fetched HTML.", summary: "Use semantic landmarks so automated readers can separate navigation, primary content, and supporting content.", priority: "low", effort: "low" }));
+	if (imagesWithoutAlt) findings.push(makeFinding({ id: "CR-017", title: "Images contain no machine-readable alternative text", severity: "medium", evidence: `${imagesWithoutAlt} of ${images.length} image elements have no alt attribute.`, summary: "Add concise, accurate alt text for informative images and use empty alt text only for decorative images.", priority: "medium", effort: "low" }));
+
+	// CR-019: OpenGraph completeness — used by AI-mediated sharing and summarisation pipelines
+	const ogTitle = metaContent(body, "og:title");
+	const ogDesc  = metaContent(body, "og:description");
+	const ogImage = metaContent(body, "og:image");
+	const missingOg = [!ogTitle && "og:title", !ogDesc && "og:description", !ogImage && "og:image"].filter(Boolean);
+	if (missingOg.length) {
+		findings.push(makeFinding({
+			id: "CR-019",
+			title: "Landing page is missing core Open Graph tags",
+			severity: "low",
+			evidence: `Missing Open Graph properties: ${missingOg.join(", ")}.`,
+			summary: "Add og:title, og:description, og:image, and og:url meta tags so AI-mediated sharing, link previews, and summarisation pipelines render the correct brand content.",
+			priority: "low",
+			effort: "low"
+		}));
+	}
+
+	// CR-020: WebSite + SearchAction JSON-LD — enables agent-level site-search orientation
+	const parsedBlocks = structuredData.flatMap((block) => { try { const v = JSON.parse(block); return Array.isArray(v) ? v : [v]; } catch { return []; } });
+	const hasWebSite = parsedBlocks.some((item) => /WebSite/i.test(String(item["@type"] ?? "")));
+	if (!hasWebSite) {
+		findings.push(makeFinding({
+			id: "CR-020",
+			title: "No WebSite structured data found",
+			severity: "low",
+			evidence: "No JSON-LD block with @type WebSite (and optional SearchAction) was found. Sitelinks Search Box and agent-level site-query scoping are unavailable.",
+			summary: "Add a WebSite JSON-LD object (with a SearchAction if the site has search) so AI agents and search crawlers can scope site-level queries and surface the search interface.",
+			priority: "low",
+			effort: "low"
+		}));
+	}
+
+	// CR-021: hreflang — language/region targeting for multi-locale AI routing
+	const hreflangTags = [...body.matchAll(/<link\b[^>]*rel=["'][^"']*alternate[^"']*["'][^>]*hreflang=["'][^"']+["'][^>]*>/gi)];
+	const looksInternational = /\.(co\.|com\.|net\.|org\.)[a-z]{2,3}$/.test(site.hostname) || /\/(en|fr|de|es|pt|ja|ko|zh|ar|hi|ru)(\/|$)/.test(site.pathname);
+	if (!hreflangTags.length && looksInternational) {
+		findings.push(makeFinding({
+			id: "CR-021",
+			title: "No hreflang tags found on a likely international domain",
+			severity: "low",
+			evidence: `Domain "${site.hostname}" or path suggests multi-region or multi-language presence, but no hreflang link elements were detected.`,
+			summary: "Add hreflang link elements for each language/region variant so AI search systems and LLM crawlers route users to the correct locale and avoid content duplication penalties.",
+			priority: "low",
+			effort: "low"
+		}));
+	}
+
 	const landingPage = { ...page, title, headings, canonical, visibleText, links: linksFrom(body, site).map(String), jsonLd: structuredData };
 	let sitemapCandidates = [];
 	try {
@@ -67,14 +142,16 @@ export async function runCrawlAudit(siteInput) {
 		const priority = /about|pricing|product|service|faq|contact|solution/i;
 		return Number(priority.test(right.pathname)) - Number(priority.test(left.pathname));
 	}).map(String))].slice(0, 4);
+	const subpageResults = await Promise.allSettled(
+		candidates.map((candidate) => fetchText(candidate, { userAgent: "BrandAIReadinessAudit/1.0 (read-only audit)", timeoutMs: 7000 }))
+	);
 	const discovered = [];
-	for (const candidate of candidates) {
-		try {
-			const result = await fetchText(candidate, { userAgent: "BrandAIReadinessAudit/1.0 (read-only audit)", timeoutMs: 7000 });
-			if (!/text\/html|application\/xhtml/i.test(result.headers.get("content-type") || "")) continue;
-			const candidateBody = result.body;
-			discovered.push({ ...result, title: tagValues(candidateBody, "title")[0] || "", headings: [...candidateBody.matchAll(/<h[1-6]\b[^>]*>([\s\S]*?)<\/h[1-6]>/gi)].map((match) => textContent(match[1])).filter(Boolean), canonical: "", visibleText: textContent(candidateBody), links: linksFrom(candidateBody, site).map(String), jsonLd: jsonLdBlocks(candidateBody) });
-		} catch { /* A single optional page must not fail the audit. */ }
+	for (const outcome of subpageResults) {
+		if (outcome.status !== "fulfilled") continue;
+		const result = outcome.value;
+		if (!/text\/html|application\/xhtml/i.test(result.headers.get("content-type") || "")) continue;
+		const candidateBody = result.body;
+		discovered.push({ ...result, title: tagValues(candidateBody, "title")[0] || "", headings: [...candidateBody.matchAll(/<h[1-6]\b[^>]*>([\s\S]*?)<\/h[1-6]>/gi)].map((match) => textContent(match[1])).filter(Boolean), canonical: "", visibleText: textContent(candidateBody), links: linksFrom(candidateBody, site).map(String), jsonLd: jsonLdBlocks(candidateBody) });
 	}
 	return { findings, pages: [landingPage, ...discovered] };
 }

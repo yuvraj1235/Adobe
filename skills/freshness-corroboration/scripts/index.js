@@ -32,7 +32,7 @@ export function inferBrandName(site, snapshots) {
 	const firstTitle = snapshots[0]?.title ||
 		tagValues(snapshots[0]?.body || "", "title")[0] || "";
 	if (firstTitle) {
-		const segments = firstTitle.split(/\s*[-—|:]\s+|\s+[-—|:]\s*/)
+		const segments = firstTitle.split(/\s*[-—|:][\s+]|[\s+][-—|:]\s*/)
 			.map((s) => s.trim())
 			.filter((s) => s.length >= 2 && s.length <= 40 && /[A-Za-z]/.test(s));
 		const candidate = segments.sort((a, b) => a.length - b.length)[0];
@@ -46,11 +46,11 @@ function structuredData(page) {
 	return page.jsonLd.flatMap((block) => { try { const value = JSON.parse(block); return Array.isArray(value) ? value : [value]; } catch { return []; } });
 }
 
-/** Return the current copyright year extracted from visible text, or null. */
+/** Return the current copyright year extracted from visible text, or null. Supports single years (© 2026) and ranges (© 2020-2026). */
 function extractCopyrightYear(texts) {
 	for (const text of texts) {
-		const match = text.match(/©\s*(20\d{2})|copyright\s*(?:©)?\s*(20\d{2})/i);
-		if (match) return Number(match[1] || match[2]);
+		const match = text.match(/(?:©|copyright\s*(?:©)?)\s*(?:20\d{2}\s*[-–—]\s*)?(20\d{2})/i);
+		if (match) return Number(match[1]);
 	}
 	return null;
 }
@@ -64,7 +64,7 @@ export async function runFreshnessAudit(siteInput, pages = []) {
 			const page = await fetchText(site);
 			snapshots = [{ ...page, body: page.body, jsonLd: jsonLdBlocks(page.body) }];
 		} catch (error) {
-			findings.push(makeFinding({ id: "FR-001", title: "Freshness audit could not access site content", severity: "medium", evidence: error.message, summary: "Provide a reachable public page so factual claims can be checked for consistency and recency.", priority: "medium" }));
+			findings.push(makeFinding({ id: "FR-001", title: "Freshness audit could not access site content", severity: "medium", evidence: error.message, summary: "Provide a reachable public page so factual claims can be checked for consistency and recency.", priority: "medium", effort: "medium" }));
 			return { findings };
 		}
 	}
@@ -79,40 +79,39 @@ export async function runFreshnessAudit(siteInput, pages = []) {
 	const uniqueTitles = [...new Map(pageTitlePairs.map((p) => [p.title, p])).values()];
 
 	// FR-002: No machine-readable organization identity
-	if (!organizationNames.length && !data.length) findings.push(makeFinding({ id: "FR-002", title: "No machine-readable organization identity was found", severity: "medium", evidence: "The fetched pages contain no Organization, LocalBusiness, Brand, or other JSON-LD identity object.", summary: "Publish one canonical organization identity with name, URL, logo, contact details, and sameAs links.", priority: "medium" }));
+	if (!organizationNames.length && !data.length) findings.push(makeFinding({ id: "FR-002", title: "No machine-readable organization identity was found", severity: "medium", evidence: "The fetched pages contain no Organization, LocalBusiness, Brand, or other JSON-LD identity object.", summary: "Publish one canonical organization identity with name, URL, logo, contact details, and sameAs links.", priority: "medium", effort: "medium" }));
 
 	// FR-007: Organization identity has no corroborating sameAs links
-	if (organizationNames.length && data.filter((item) => /Organization|LocalBusiness|Brand/i.test(String(item["@type"]))).every((item) => !item.sameAs)) findings.push(makeFinding({ id: "FR-007", title: "Organization identity has no corroborating profile links", severity: "low", evidence: "Organization structured data was found, but none of its identity objects contains sameAs links.", summary: "Add accurate sameAs links to authoritative profiles so assistants can distinguish and corroborate the brand entity.", priority: "low" }));
+	if (organizationNames.length && data.filter((item) => /Organization|LocalBusiness|Brand/i.test(String(item["@type"]))).every((item) => !item.sameAs)) findings.push(makeFinding({ id: "FR-007", title: "Organization identity has no corroborating profile links", severity: "low", evidence: "Organization structured data was found, but none of its identity objects contains sameAs links.", summary: "Add accurate sameAs links to authoritative profiles (Wikidata, Wikipedia, LinkedIn, GitHub) so AI assistants can distinguish and corroborate the brand entity.", priority: "low", effort: "low" }));
 
 	// FR-003: Conflicting organization names across structured data
-	if (organizationNames.length > 1 && !organizationNames.every((name) => name === organizationNames[0])) findings.push(makeFinding({ id: "FR-003", title: "Organization names conflict across structured data", severity: "high", evidence: `Found multiple organization names: ${[...new Set(organizationNames)].join(", ")}.`, summary: "Choose one canonical brand name and use it consistently across pages and structured data.", priority: "high" }));
+	if (organizationNames.length > 1 && !organizationNames.every((name) => name === organizationNames[0])) findings.push(makeFinding({ id: "FR-003", title: "Organization names conflict across structured data", severity: "high", evidence: `Found multiple organization names: ${[...new Set(organizationNames)].join(", ")}.`, summary: "Choose one canonical brand name and use it consistently across pages and structured data.", priority: "high", effort: "low" }));
 
 	// FR-004: Potentially stale year claims
 	const dates = snapshots.flatMap((page) => parseDateClaims(page.body || ""));
 	const oldYears = dates.filter((date) => Number.parseInt(date.slice(0, 4), 10) < new Date().getUTCFullYear() - 3);
-	if (oldYears.length && !/copyright|founded|established|history/i.test(texts.join(" "))) findings.push(makeFinding({ id: "FR-004", title: "Pages contain potentially stale year claims", severity: "medium", evidence: `Found year claims older than three years: ${[...new Set(oldYears)].slice(0, 5).join(", ")}.`, summary: "Review dated claims and add explicit updated or valid-through dates where facts remain current.", priority: "medium" }));
+	if (oldYears.length && !/copyright|founded|established|history/i.test(texts.join(" "))) findings.push(makeFinding({ id: "FR-004", title: "Pages contain potentially stale year claims", severity: "medium", evidence: `Found year claims older than three years: ${[...new Set(oldYears)].slice(0, 5).join(", ")}.`, summary: "Review dated claims and add explicit updated or valid-through dates where facts remain current.", priority: "medium", effort: "medium" }));
 
 	// FR-009: Stale or absent copyright year in page footer
 	const copyrightYear = extractCopyrightYear(texts);
 	const currentYear = new Date().getUTCFullYear();
 	if (copyrightYear !== null && copyrightYear < currentYear - 1) {
-		findings.push(makeFinding({ id: "FR-009", title: "Copyright year in page footer appears stale", severity: "medium", evidence: `Detected copyright year ${copyrightYear}; current year is ${currentYear}. Stale copyright notices signal infrequently updated content to automated readers.`, summary: "Update the copyright year and add a visible last-updated or published date to key content pages.", priority: "medium" }));
+		findings.push(makeFinding({ id: "FR-009", title: "Copyright year in page footer appears stale", severity: "medium", evidence: `Detected copyright year ${copyrightYear}; current year is ${currentYear}. Stale copyright notices signal infrequently updated content to automated readers.`, summary: "Update the copyright year and add a visible last-updated or published date to key content pages.", priority: "medium", effort: "low" }));
 	} else if (copyrightYear === null && !/last.?updated|published|modified|updated\s+\d{4}/i.test(texts.join(" "))) {
-		findings.push(makeFinding({ id: "FR-010", title: "No visible freshness signal found on the page", severity: "low", evidence: "No copyright year, last-updated date, or publication date was detected in the fetched content.", summary: "Add a visible freshness signal (e.g. last updated date, copyright year) so automated readers can assess content recency.", priority: "low" }));
+		findings.push(makeFinding({ id: "FR-010", title: "No visible freshness signal found on the page", severity: "low", evidence: "No copyright year, last-updated date, or publication date was detected in the fetched content.", summary: "Add a visible freshness signal (e.g. last updated date, copyright year) so automated readers can assess content recency.", priority: "low", effort: "low" }));
 	}
 
 	// FR-005: Inconsistent page titles suggesting unstable brand identity (deduplicated)
 	if (uniqueTitles.length > 1 && organizationNames.length === 0) {
 		const titleEvidence = uniqueTitles.slice(0, 4).map((p) => `"${p.title}" (${p.url})`).join(" | ");
-		findings.push(makeFinding({ id: "FR-005", title: "Page naming does not establish a stable brand identity", severity: "low", evidence: `Observed ${uniqueTitles.length} distinct page titles: ${titleEvidence}.`, summary: "Use a consistent brand name and canonical site identity in titles, headings, and structured data.", priority: "low" }));
+		findings.push(makeFinding({ id: "FR-005", title: "Page naming does not establish a stable brand identity", severity: "low", evidence: `Observed ${uniqueTitles.length} distinct page titles: ${titleEvidence}.`, summary: "Use a consistent brand name and canonical site identity in titles, headings, and structured data.", priority: "low", effort: "low" }));
 	}
 
-	// FR-006: Conflicting pricing claims
 	// FR-006: Conflicting pricing claims — require at least one digit to avoid noise words
 	const claims = texts.flatMap((text) => [...text.matchAll(/(?:price|cost|starts? at|from)\s*[:$€£]?\s*[$€£]?\s*[\d][\d,.]*(?:\s*(?:per|\/|a)\s*\w+)?/gi)].map((match) => match[0].trim()));
-	if (new Set(claims).size > 1) findings.push(makeFinding({ id: "FR-006", title: "Pricing claims vary across fetched content", severity: "high", evidence: `Found distinct pricing statements: ${[...new Set(claims)].slice(0, 4).join("; ")}.`, summary: "Centralize pricing, state currency and billing period, and mark plan availability and effective dates clearly.", priority: "high" }));
+	if (new Set(claims).size > 1) findings.push(makeFinding({ id: "FR-006", title: "Pricing claims vary across fetched content", severity: "high", evidence: `Found distinct pricing statements: ${[...new Set(claims)].slice(0, 4).join("; ")}.`, summary: "Centralize pricing, state currency and billing period, and mark plan availability and effective dates clearly.", priority: "high", effort: "medium" }));
 
-	// FR-008 / FR-011: Cross-source entity corroboration via Wikidata (always-on, one bounded read-only GET).
+	// FR-008 / FR-011 / FR-012: Cross-source entity corroboration via Wikidata (always-on, one bounded read-only GET).
 	// Brand name is resolved by inferBrandName() which uses a strict priority chain
 	// (og:site_name → domain label → title segment) and never reads body/nav text.
 	const nameForCorroboration = organizationNames[0] ?? inferBrandName(site, snapshots);
@@ -127,16 +126,16 @@ export async function runFreshnessAudit(siteInput, pages = []) {
 			const results = JSON.parse(response.body).search || [];
 			const exact = results.find((item) => item.label?.toLowerCase() === nameForCorroboration.toLowerCase());
 			if (!results.length) {
-				findings.push(makeFinding({ id: "FR-011", title: "Brand name not found in public knowledge base", severity: "medium", evidence: `Wikidata search for "${nameForCorroboration}" returned no results. The brand may be too new, use a common-noun name, or lack public entity records.`, summary: "Ensure the brand has a Wikidata entry, Wikipedia article, or sameAs link to a recognized authority source so AI assistants can corroborate and disambiguate it.", priority: "medium" }));
+				findings.push(makeFinding({ id: "FR-011", title: "Brand name not found in public knowledge base", severity: "medium", evidence: `Wikidata search for "${nameForCorroboration}" returned no results. The brand may be too new, use a common-noun name, or lack a public entity record.`, summary: `Ensure the brand has a Wikidata entry or Wikipedia article. Wikidata entries are freely self-created at https://www.wikidata.org/wiki/Special:NewItem following notability guidelines. Once created, add its URL as a sameAs link in your Organization JSON-LD so AI assistants can corroborate and disambiguate the brand entity.`, priority: "medium", effort: "medium" }));
 			} else if (!exact && results.length) {
 				// Name collision / disambiguation problem — other entities share the name
 				const collisions = results.slice(0, 3).map((item) => `"${item.label}"${item.description ? ` (${item.description})` : ""}`).join("; ");
-				findings.push(makeFinding({ id: "FR-008", title: "Brand name has ambiguous entity matches in public knowledge base", severity: "medium", evidence: `Wikidata search for "${nameForCorroboration}" returned ${results.length} candidate(s), none an exact match: ${collisions}. Entity disambiguation may be needed.`, summary: "Add sameAs links in structured data pointing to an authoritative external record (Wikidata, Wikipedia, LinkedIn) and ensure the official brand name matches exactly.", priority: "medium" }));
+				findings.push(makeFinding({ id: "FR-008", title: "Brand name has ambiguous entity matches in public knowledge base", severity: "medium", evidence: `Wikidata search for "${nameForCorroboration}" returned ${results.length} candidate(s), none an exact match: ${collisions}. Entity disambiguation may be needed.`, summary: "Add sameAs links in structured data pointing to an authoritative external record (Wikidata, Wikipedia, LinkedIn) and ensure the official brand name matches exactly to resolve entity disambiguation.", priority: "medium", effort: "medium" }));
 			}
 			// If exact match found: no finding — corroboration passes silently
 		} catch { /* Cross-source corroboration is optional and must never block a first-party audit. */ }
 	} else {
-		findings.push(makeFinding({ id: "FR-012", title: "No brand name could be detected for cross-source corroboration", severity: "low", evidence: "No Organization name was found in JSON-LD and no sufficiently repeated proper noun was detected in the fetched content.", summary: "Publish an Organization entity in JSON-LD with a clear, consistent name to enable automated brand recognition and corroboration.", priority: "low" }));
+		findings.push(makeFinding({ id: "FR-012", title: "No brand name could be detected for cross-source corroboration", severity: "low", evidence: "No Organization name was found in JSON-LD and no sufficiently repeated proper noun was detected in the fetched content.", summary: "Publish an Organization entity in JSON-LD with a clear, consistent name to enable automated brand recognition and corroboration.", priority: "low", effort: "medium" }));
 	}
 
 	return { findings };

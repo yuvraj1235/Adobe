@@ -18,7 +18,8 @@ for (const skill of manifest.skills) {
   if (!fs.existsSync(definitionPath)) throw new Error(`${skill.id} is missing SKILL.md`);
   const definition = fs.readFileSync(definitionPath, "utf8");
   if (!definition.startsWith("---\n") || !/^name:\s*\S+/m.test(definition) || !/^description:\s*\S+/m.test(definition)) throw new Error(`${skill.id} has invalid SKILL.md frontmatter`);
-  if (skill.entrypoint === true && !fs.existsSync(path.join(skillPath, "scripts/index.js"))) throw new Error(`${skill.id} is missing scripts/index.js`);
+  // Internal skills (e.g. shared utilities) do not require a scripts/index.js entrypoint
+  if (skill.entrypoint === true && !skill.internal && !fs.existsSync(path.join(skillPath, "scripts/index.js"))) throw new Error(`${skill.id} is missing scripts/index.js`);
 }
 
-console.log(`Marketplace valid: ${manifest.skills.length} skills, 1 entrypoint`);
+console.log(`Marketplace valid: ${manifest.skills.length} skills (${manifest.skills.filter(s => s.internal).length} internal), 1 entrypoint`);

@@ -9,13 +9,32 @@ export function normalizeSite(value) {
   return url;
 }
 
-export function makeFinding({ id, title, severity, evidence, summary, priority = severity }) {
+export function makeFinding({ id, title, severity, evidence, summary, priority = severity, effort = "medium" }) {
   if (!SEVERITIES.includes(severity)) throw new Error(`Invalid severity: ${severity}`);
-  return { id, title, severity, evidence, suggested_action: { summary, priority } };
+  if (!["low", "medium", "high"].includes(effort)) throw new Error(`Invalid effort: ${effort}`);
+  return { id, title, severity, evidence, suggested_action: { summary, priority, effort } };
 }
 
+const ENTITY_MAP = {
+  "&nbsp;": " ",
+  "&#160;": " ",
+  "&amp;": "&",
+  "&quot;": '"',
+  "&#39;": "'",
+  "&apos;": "'",
+  "&lt;": "<",
+  "&gt;": ">"
+};
+
 export function textContent(html) {
-  return html.replace(/<!--[\s\S]*?-->/g, " ").replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, " ").replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, " ").replace(/<[^>]+>/g, " ").replace(/&nbsp;|&#160;/gi, " ").replace(/&amp;/gi, "&").replace(/&quot;/gi, '"').replace(/&#39;|&apos;/gi, "'").replace(/\s+/g, " ").trim();
+  if (!html) return "";
+  return html
+    .replace(/<!--[\s\S]*?-->/g, " ")
+    .replace(/<(?:script|style)\b[^>]*>[\s\S]*?<\/(?:script|style)>/gi, " ")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&(?:nbsp|#160|amp|quot|#39|apos|lt|gt);/gi, (match) => ENTITY_MAP[match.toLowerCase()] || " ")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 export function tagValues(html, tag) {
@@ -130,6 +149,32 @@ export function robotsDisallows(robots, path) {
   if (!matches.length) return false;
   const longest = Math.max(...matches.map((match) => match.length));
   return matches.some((match) => match.length === longest && match.type === "disallow");
+}
+
+export function checkAiCrawlerBlocks(robots) {
+  if (!robots || !Array.isArray(robots.rules)) return [];
+  const aiBots = ["GPTBot", "ClaudeBot", "PerplexityBot", "CCBot", "Google-Extended", "Applebot-Extended"];
+  const blocked = [];
+  for (const bot of aiBots) {
+    let applies = false;
+    const matches = [];
+    for (const line of robots.rules) {
+      const [key, rawValue = ""] = line.split(":", 2);
+      const normalizedKey = key.toLowerCase();
+      const value = rawValue.trim();
+      if (normalizedKey === "user-agent") applies = new RegExp(`^${bot}$`, "i").test(value);
+      if (applies && (normalizedKey === "allow" || normalizedKey === "disallow") && value && "/".startsWith(value)) {
+        matches.push({ type: normalizedKey, length: value.length });
+      }
+    }
+    if (matches.length) {
+      const longest = Math.max(...matches.map((m) => m.length));
+      if (matches.some((m) => m.length === longest && m.type === "disallow")) {
+        blocked.push(bot);
+      }
+    }
+  }
+  return blocked;
 }
 
 export function parseDateClaims(html) {

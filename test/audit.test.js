@@ -30,7 +30,8 @@ test("orchestrator returns the required report contract", async (t) => {
   assert.equal(report.site, `http://127.0.0.1:${address.port}/`);
   assert.equal(report.summary.total_findings, report.findings.length);
   assert.equal(report.summary.critical, report.findings.filter((item) => item.severity === "critical").length);
-  assert.ok(report.findings.every((item) => item.id && item.title && item.evidence && item.suggested_action.summary && item.suggested_action.priority));
+  assert.ok(report.findings.every((item) => item.id && item.title && item.evidence && item.suggested_action.summary && item.suggested_action.priority && item.suggested_action.effort));
+  assert.ok(Array.isArray(report.action_plan));
 });
 
 test("crawl audit discovers a relevant page from sitemap.xml", async (t) => {
@@ -322,4 +323,103 @@ test("inferBrandName: falls back to cleaned domain label when og:site_name is ab
   assert.ok(name !== "Alexa Skills", "Must not select nav category text");
   assert.ok(name !== "Categories", "Must not select nav label");
   assert.ok(name !== "Terms Conditions", "Must not select legal nav text");
+});
+
+test("crawl audit detects missing Open Graph tags (CR-019) and WebSite JSON-LD (CR-020)", async (t) => {
+  const server = createServer((request, response) => {
+    if (request.url === "/robots.txt") {
+      response.writeHead(200, { "content-type": "text/plain" });
+      response.end("User-agent: *\nAllow: /");
+      return;
+    }
+    response.writeHead(200, { "content-type": "text/html" });
+    response.end("<!doctype html><html><head><title>Simple Title</title></head><body><main><h1>Heading</h1><p>Some text content here.</p></main></body></html>");
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => server.close());
+  const address = server.address();
+  const report = await runAudit(`http://127.0.0.1:${address.port}`);
+  assert.ok(report.findings.some((item) => item.id.startsWith("F-") && item.title === "Landing page is missing core Open Graph tags"));
+  assert.ok(report.findings.some((item) => item.id.startsWith("F-") && item.title === "No WebSite structured data found"));
+});
+
+test("crawl audit detects missing hreflang on international domains (CR-021)", async (t) => {
+  const server = createServer((request, response) => {
+    if (request.url === "/robots.txt") {
+      response.writeHead(200, { "content-type": "text/plain" });
+      response.end("User-agent: *\nAllow: /");
+      return;
+    }
+    response.writeHead(200, { "content-type": "text/html" });
+    response.end("<!doctype html><html><head><title>International Store</title></head><body><main><h1>Global Store</h1><p>International delivery available.</p></main></body></html>");
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => server.close());
+  const address = server.address();
+  const report = await runAudit(`http://127.0.0.1:${address.port}/en/products`);
+  assert.ok(report.findings.some((item) => item.title === "No hreflang tags found on a likely international domain"));
+});
+
+test("orchestrator builds action_plan prioritizing critical/high findings with low effort first", async (t) => {
+  const server = createServer((request, response) => {
+    if (request.url === "/robots.txt") {
+      response.writeHead(200, { "content-type": "text/plain" });
+      response.end("User-agent: *\nAllow: /");
+      return;
+    }
+    response.writeHead(200, { "content-type": "text/html" });
+    // Minimal page triggering multiple high/medium findings with different efforts
+    response.end("<!doctype html><html><head><title>Title</title></head><body><main><h1>Proposition</h1><p>Brief text.</p></main></body></html>");
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => server.close());
+  const address = server.address();
+  const report = await runAudit(`http://127.0.0.1:${address.port}`);
+  assert.ok(Array.isArray(report.action_plan));
+  assert.ok(report.action_plan.length <= 3);
+  if (report.action_plan.length > 0) {
+    assert.ok(report.action_plan[0].finding_id);
+    assert.ok(report.action_plan[0].title);
+    assert.ok(report.action_plan[0].action);
+    assert.ok(["critical", "high"].includes(report.action_plan[0].priority));
+    assert.ok(["low", "medium", "high"].includes(report.action_plan[0].effort));
+  }
+});
+
+test("crawl audit detects AI search crawlers blocked in robots.txt (CR-022)", async (t) => {
+  const server = createServer((request, response) => {
+    if (request.url === "/robots.txt") {
+      response.writeHead(200, { "content-type": "text/plain" });
+      response.end("User-agent: *\nAllow: /\nUser-agent: GPTBot\nDisallow: /\nUser-agent: ClaudeBot\nDisallow: /");
+      return;
+    }
+    response.writeHead(200, { "content-type": "text/html" });
+    response.end("<!doctype html><html><head><title>Test Site</title></head><body><main><h1>Public</h1></main></body></html>");
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => server.close());
+  const address = server.address();
+  const report = await runAudit(`http://127.0.0.1:${address.port}`);
+  const finding = report.findings.find((item) => item.title === "robots.txt explicitly blocks major AI search crawlers");
+  assert.ok(finding);
+  assert.ok(finding.evidence.includes("GPTBot"));
+  assert.ok(finding.evidence.includes("ClaudeBot"));
+});
+
+test("freshness audit correctly resolves multi-year copyright ranges (e.g. 2020-2026)", async (t) => {
+  const server = createServer((request, response) => {
+    if (request.url === "/robots.txt") {
+      response.writeHead(200, { "content-type": "text/plain" });
+      response.end("User-agent: *\nAllow: /");
+      return;
+    }
+    response.writeHead(200, { "content-type": "text/html" });
+    response.end(`<!doctype html><html><head><title>Acme</title></head><body><main><h1>Acme</h1></main><footer><p>&copy; 2019-${new Date().getUTCFullYear()} Acme Corp. All rights reserved.</p></footer></body></html>`);
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => server.close());
+  const address = server.address();
+  const report = await runAudit(`http://127.0.0.1:${address.port}`);
+  // Current year is in the copyright range, so it must NOT trigger stale copyright year
+  assert.ok(!report.findings.some((item) => item.title === "Copyright year in page footer appears stale"));
 });

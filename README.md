@@ -19,23 +19,21 @@ Every fetch is a **read-only GET**. The audit never logs in, submits forms, alte
 
 ## How the Orchestrator Composes Results
 
-`audit-orchestrator` is the single entrypoint. It runs the three specialist skills in sequence and merges their findings:
+`audit-orchestrator` is the single entrypoint. It runs `crawl-render-audit` first to obtain the bounded snapshot, then executes `freshness-corroboration` and `engagement-audit` concurrently:
 
 ```
 runAudit(siteInput)
   │
-  ├─ 1. crawl-render-audit       ← fetches landing page + up to 4 sub-pages
+  ├─ 1. crawl-render-audit       ← fetches landing page + up to 4 sub-pages (concurrent)
   │       └─ returns: findings[], pages[]
   │
   ├─ [early exit if pages=[] — bot-block or crawl failure]
   │
-  ├─ 2. freshness-corroboration  ← receives pages[] from step 1 (no re-fetch)
-  │       └─ returns: findings[]
+  ├─ 2. [Concurrent Specialist Phase via Promise.allSettled]
+  │       ├─ freshness-corroboration  ← receives pages[] from step 1 (identity, dates, Wikidata)
+  │       └─ engagement-audit         ← receives pages[] from step 1 (proposition, CTA, FAQ, nav)
   │
-  ├─ 3. engagement-audit         ← receives pages[] from step 1 (no re-fetch)
-  │       └─ returns: findings[]
-  │
-  └─ merge → deduplicate → sort by severity → assign stable F-NNN IDs → emit report
+  └─ merge → deduplicate → sort by severity → build action_plan → emit report
 ```
 
 Each skill is wrapped in a try/catch. A failing skill adds one `OR-NNN` finding and does not abort the remaining skills.
@@ -46,30 +44,34 @@ Skill invocation and per-finding contribution is logged to **stderr** on every r
 [orchestrator] crawl-render-audit done: 4 finding(s), 2 page(s) collected
 [orchestrator] freshness skill done: 2 finding(s) — FR-009:Copyright year stale, FR-008:Brand name ambiguous
 [orchestrator] engagement skill done: 0 finding(s) — all checks passed
-[orchestrator] DONE total_findings=6 wall-clock=2341ms
+[orchestrator] DONE total_findings=6 wall-clock=420ms
 ```
 
 ## Skills and Checks Owned by Each
 
 ### 1. `audit-orchestrator`
-Single entrypoint. No content checks of its own — only composes, deduplicates, sorts, and assigns report IDs.
+Single entrypoint. No content checks of its own — only composes, deduplicates, sorts, prioritizes the `action_plan`, and assigns sequential report IDs.
 
 ### 2. `crawl-render-audit`
 **Reachability and HTML delivery:**
 - Bot-block / content-emptiness detection (HTTP status + byte/text threshold)
 - Landing page fetch failure or timeout
 - HTTP error status (4xx/5xx)
-- Redirect chain length
+- Redirect chain length & cap diagnostic
 - Non-HTML Content-Type
 - `robots.txt` disallow for the audit user agent
+- `robots.txt` disallow for major AI search crawlers (`GPTBot`, `ClaudeBot`, `PerplexityBot`, `CCBot`, `Google-Extended`, `Applebot-Extended`)
 
-**Content structure:**
+**Content structure & AI Discoverability:**
 - Very little server-readable text (< 200 chars after stripping)
 - JS-only render gap (< 200 chars + ≥ 3 script tags)
 - Missing `<title>`
 - Missing meta description
 - Missing `<h1>`
 - Missing JSON-LD structured data / invalid JSON-LD
+- Missing WebSite structured data (`@type: WebSite` / SearchAction)
+- Missing core Open Graph tags (`og:title`, `og:description`, `og:image`)
+- Missing `hreflang` internationalization on regional/multi-language domains
 - `noindex` meta or X-Robots-Tag
 - Missing canonical URL
 - Weak semantic landmarks (`main`, `nav`, `header`, `footer`)
@@ -90,7 +92,7 @@ Single entrypoint. No content checks of its own — only composes, deduplicates,
 - No visible freshness signal at all (no copyright year, no last-updated date)
 
 **Cross-source corroboration (always-on, one bounded read-only Wikidata GET):**
-- Brand name not found in Wikidata — entity may lack public recognition
+- Brand name not found in Wikidata — entity may lack public recognition (direct self-creation link provided)
 - Brand name has ambiguous entity matches — name collision / disambiguation problem (Appendix D)
 - No brand name detectable at all — JSON-LD absent and no repeated proper noun found
 
@@ -107,7 +109,7 @@ Single entrypoint. No content checks of its own — only composes, deduplicates,
 - No conversion path language (pricing, plans, booking, trial, free)
 
 **Direct answers and trust:**
-- No FAQ, help centre, or "how it works" content
+- No FAQ, help centre, or "how it works" content (the most citable LLM content format)
 - No trust/support signals (contact, support, privacy, security, testimonials)
 
 **Navigation:**
@@ -126,6 +128,15 @@ Single entrypoint. No content checks of its own — only composes, deduplicates,
     "total_findings": 4,
     "critical": 0, "high": 1, "medium": 2, "low": 1
   },
+  "action_plan": [
+    {
+      "finding_id": "F-001",
+      "title": "Landing page is blocked by robots.txt",
+      "action": "Review robots.txt and allow approved crawlers to access public marketing content.",
+      "priority": "critical",
+      "effort": "low"           // low | medium | high
+    }
+  ],
   "findings": [
     {
       "id": "F-001",
@@ -134,28 +145,31 @@ Single entrypoint. No content checks of its own — only composes, deduplicates,
       "evidence": "...",         // specific observed values (status, bytes, counts, text)
       "suggested_action": {
         "summary": "...",
-        "priority": "high"
+        "priority": "high",      // critical | high | medium | low
+        "effort": "low"          // low | medium | high
       }
     }
   ]
 }
 ```
 
-Finding IDs are sequential (`F-001`, `F-002`, …) sorted by severity descending. They are stable within a run but may shift between runs as findings appear or disappear.
+Finding IDs are sequential (`F-001`, `F-002`, …) sorted by severity descending. They are stable within a run but may shift between runs as findings appear or disappear. An `action_plan` executive summary prioritizes up to 3 critical/high findings ranked by severity and implementation effort (low effort first).
 
 ## Layout
 
 ```
 skills/
   audit-orchestrator/       ← entrypoint
-  crawl-render-audit/       ← reachability + HTML structure
-  freshness-corroboration/  ← identity, dates, cross-source corroboration
-  engagement-audit/         ← proposition, CTA, trust, navigation
-  shared/
+  crawl-render-audit/       ← reachability + HTML structure + OpenGraph + WebSite
+  freshness-corroboration/  ← identity, dates, cross-source Wikidata corroboration
+  engagement-audit/         ← proposition, CTA, FAQ, trust, navigation
+  shared/                   ← shared reasoning engine (internal)
+    SKILL.md                ← documentation of shared helpers
     audit-utils.js          ← fetchText, detectBotBlock, makeFinding, etc.
 marketplace.json
 test/
   audit.test.js
 ```
 
-`marketplace.json` lists the four skills and marks exactly one entrypoint. The marketplace completes within the five-minute runtime target for typical sites.
+`marketplace.json` lists the four public skills, marks exactly one entrypoint (`audit-orchestrator`), and includes the internal `shared-utils` module. The marketplace completes within the five-minute runtime target for typical sites.
+
